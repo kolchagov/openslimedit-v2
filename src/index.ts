@@ -1,93 +1,170 @@
-import type { Plugin } from "@opencode-ai/plugin"
-import * as fs from "fs"
-import * as path from "path"
+import { Plugin } from "@opencode/plugin"
+import * as fs from "node:fs"
+import * as path from "node:path"
+
 const LINE_RANGE_RE = /^(\d+)(?:\s*-\s*(\d+))?$/
 
-export const OpenSlimeditPlugin: Plugin = async ({ directory }) => {
-  function resolvePath(filePath: string): string {
-    if (path.isAbsolute(filePath)) return path.normalize(filePath)
-    return path.resolve(directory, filePath)
+const SLIM_DESCRIPTIONS: Record<string, string> = {
+  read: "Read file content.",
+  edit: "Edit file. oldString can be a line range like '55-64'.",
+  write: "Write file.",
+  shell: "Run a shell command.",
+  patch: "Apply a patch to files.",
+  apply_patch: "Apply a patch to files.",
+  glob: "Find files.",
+  grep: "Search in files.",
+  fetch: "Fetch a URL.",
+}
+
+type EditInput = {
+  filePath?: unknown
+  oldString?: unknown
+  [key: string]: unknown
+}
+
+type ToolResult = {
+  output?: unknown
+  content?: unknown
+  [key: string]: unknown
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  return value as Record<string, unknown>
+}
+
+function asEditInput(value: unknown): EditInput | undefined {
+  const input = asRecord(value)
+  if (!input) return undefined
+  return input as EditInput
+}
+
+function asToolResult(value: unknown): ToolResult | undefined {
+  const result = asRecord(value)
+  if (!result) return undefined
+  return result as ToolResult
+}
+
+function textOutput(result: ToolResult): string | undefined {
+  if (typeof result.output === "string") return result.output
+  if (typeof result.content === "string") return result.content
+  if (!Array.isArray(result.content)) return undefined
+  return result.content
+    .filter((part): part is { type: "text"; text: string } => {
+      return (
+        typeof part === "object" &&
+        part !== null &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string"
+      )
+    })
+    .map(part => part.text)
+    .join("")
+}
+
+function compactReadOutput(output: string, directory: string): string {
+  if (output.includes("<type>directory</type>")) return output
+
+  // OpenCode V2's built-in read tool uses a plain-text envelope.
+  const v2PathMatch = output.match(/^Read file (.+?), lines \d+-\d+\n/)
+  if (v2PathMatch) {
+    const absPath = path.normalize(v2PathMatch[1])
+    const relPath = path.relative(directory, absPath)
+    return `Read file ${relPath}\n${output.slice(v2PathMatch[0].length)}`
   }
 
-  return {
-    // Shorten tool descriptions + strip parameter descriptions
-    "tool.definition": async (input: any, output: any) => {
-      const SLIM: Record<string, string> = {
-        read: "Read file content.",
-        edit: "Edit file. oldString can be line range '55-64'.",
-        apply_patch: "Apply a patch to files.",
-        write: "Write file.",
-        bash: "Run shell command.",
-        glob: "Find files.",
-        grep: "Search in files.",
-        list: "List directory.",
-        fetch: "Fetch URL.",
-      }
-      if (SLIM[input.toolID]) {
-        output.description = SLIM[input.toolID]
-      }
-    },
+  // Keep compatibility with the V1 XML-style read envelope.
+  const pathMatch = output.match(/<path>(.+?)<\/path>/)
+  if (!pathMatch) return output
 
-    // Compact tool output: shorten read paths, strip footer, compress edit results
-    "tool.execute.after": async (input, output) => {
-      // Compress edit output
-      if (input.tool === "edit") {
-        if (output.output.startsWith("Edit applied successfully.")) {
-          output.output = "OK"
+  const absPath = path.normalize(pathMatch[1])
+  const relPath = path.relative(directory, absPath)
+  let compacted = output.replace(`<path>${pathMatch[1]}</path>`, `<path>${relPath}</path>`)
+  compacted = compacted.replace("<type>file</type>\n", "")
+  return compacted.replace(/\n\n\(End of file - total \d+ lines\)\n/, "\n")
+}
+
+function expandLineRange(input: EditInput, directory: string): void {
+  if (typeof input.filePath !== "string" || typeof input.oldString !== "string") return
+
+  const filePath = path.isAbsolute(input.filePath)
+    ? path.normalize(input.filePath)
+    : path.resolve(directory, input.filePath)
+
+  let content: string
+  try {
+    content = fs.readFileSync(filePath, "utf-8")
+  } catch {
+    return
+  }
+
+  if (content.includes(input.oldString)) return
+
+  const match = input.oldString.trim().match(LINE_RANGE_RE)
+  if (!match) return
+
+  const lines = content.split("\n")
+  const startLine = Number.parseInt(match[1], 10)
+  const endLine = match[2] ? Number.parseInt(match[2], 10) : startLine
+
+  if (startLine >= 1 && endLine <= lines.length && startLine <= endLine) {
+    input.oldString = lines.slice(startLine - 1, endLine).join("\n")
+  }
+}
+
+export default Plugin.define({
+  id: "openslimedit",
+
+  async setup(ctx) {
+    const directory = ctx.location.directory
+
+    await ctx.tool.transform(editor => {
+      for (const id of Object.keys(SLIM_DESCRIPTIONS)) {
+        editor.update(id, tool => {
+          tool.description = SLIM_DESCRIPTIONS[id]
+        })
+      }
+    })
+
+    await ctx.tool.hook("execute.before", event => {
+      if (event.tool !== "edit") return
+      const input = asEditInput(event.input)
+      if (input) expandLineRange(input, directory)
+    })
+
+    await ctx.tool.hook("execute.after", event => {
+      if (event.status !== "completed") return
+      const result = asToolResult(event.result)
+      if (!result) return
+
+      if (event.tool === "edit") {
+        const output = textOutput(result)
+        if (output?.startsWith("Edit applied successfully.")) {
+          if (typeof result.output === "string") result.output = "OK"
+          else if (typeof result.content === "string") result.content = "OK"
         }
         return
       }
 
-      if (input.tool !== "read") return
-      if (output.output.includes("<type>directory</type>")) return
+      if (event.tool !== "read") return
+      const output = textOutput(result)
+      if (!output) return
+      const compacted = compactReadOutput(output, directory)
+      if (compacted === output) return
 
-      const pathMatch = output.output.match(/<path>(.+?)<\/path>/)
-      if (!pathMatch) return
-
-      // Shorten to relative path
-      const absPath = path.normalize(pathMatch[1])
-      const relPath = path.relative(directory, absPath)
-      output.output = output.output.replace(
-        `<path>${pathMatch[1]}</path>`,
-        `<path>${relPath}</path>`,
-      )
-
-      // Remove type tag and footer
-      output.output = output.output.replace("<type>file</type>\n", "")
-      output.output = output.output.replace(
-        /\n\n\(End of file - total \d+ lines\)\n/,
-        "\n",
-      )
-    },
-
-    // Expand line ranges in oldString
-    "tool.execute.before": async (input, output) => {
-      if (input.tool !== "edit") return
-      const args = output.args
-      if (!args.oldString || !args.filePath) return
-
-      const filePath = resolvePath(args.filePath)
-      let content: string
-      try {
-        content = fs.readFileSync(filePath, "utf-8")
-      } catch {
-        return
+      if (typeof result.output === "string") result.output = compacted
+      else if (typeof result.content === "string") result.content = compacted
+      else if (Array.isArray(result.content)) {
+        const textParts = result.content.filter(part => {
+          return (
+            typeof part === "object" &&
+            part !== null &&
+            (part as { type?: unknown }).type === "text" &&
+            typeof (part as { text?: unknown }).text === "string"
+          )
+        }) as Array<{ type: "text"; text: string }>
+        if (textParts.length > 0) textParts[0].text = compacted
       }
-
-      if (content.includes(args.oldString)) return
-
-      const match = args.oldString.trim().match(LINE_RANGE_RE)
-      if (!match) return
-
-      const lines = content.split("\n")
-      const startLine = parseInt(match[1], 10)
-      const endLine = match[2] ? parseInt(match[2], 10) : startLine
-
-      if (startLine >= 1 && endLine <= lines.length && startLine <= endLine) {
-        args.oldString = lines.slice(startLine - 1, endLine).join("\n")
-      }
-    },
-  } as any
-}
-
-export default OpenSlimeditPlugin
+    })
+  },
+})
