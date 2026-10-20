@@ -3,6 +3,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 
 const LINE_RANGE_RE = /^(\d+)(?:\s*-\s*(\d+))?$/
+// V2 success text: "Edited <file> (<n> replacement|replacements)"
+const EDIT_RESULT_RE = /^Edited .+ \(\d+ replacements?\)$/
 
 const SLIM_DESCRIPTIONS: Record<string, string> = {
   read: "Read file content.",
@@ -156,7 +158,7 @@ export default Plugin.define({
 
       if (event.tool === "edit") {
         const output = textOutput(result)
-        if (output?.startsWith("Edited ")) replaceTextOutput(result, "OK")
+        if (output && EDIT_RESULT_RE.test(output)) replaceTextOutput(result, "OK")
         return
       }
 
