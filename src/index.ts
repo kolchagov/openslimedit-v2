@@ -17,7 +17,7 @@ const SLIM_DESCRIPTIONS: Record<string, string> = {
 }
 
 type EditInput = {
-  filePath?: unknown
+  path?: unknown
   oldString?: unknown
   [key: string]: unknown
 }
@@ -85,11 +85,11 @@ function compactReadOutput(output: string, directory: string): string {
 }
 
 function expandLineRange(input: EditInput, directory: string): void {
-  if (typeof input.filePath !== "string" || typeof input.oldString !== "string") return
+  if (typeof input.path !== "string" || typeof input.oldString !== "string") return
 
-  const filePath = path.isAbsolute(input.filePath)
-    ? path.normalize(input.filePath)
-    : path.resolve(directory, input.filePath)
+  const filePath = path.isAbsolute(input.path)
+    ? path.normalize(input.path)
+    : path.resolve(directory, input.path)
 
   let content: string
   try {
@@ -139,7 +139,7 @@ export default Plugin.define({
 
       if (event.tool === "edit") {
         const output = textOutput(result)
-        if (output?.startsWith("Edit applied successfully.")) {
+        if (output?.startsWith("Edited ")) {
           if (typeof result.output === "string") result.output = "OK"
           else if (typeof result.content === "string") result.content = "OK"
         }
