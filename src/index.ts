@@ -45,21 +45,38 @@ function asToolResult(value: unknown): ToolResult | undefined {
   return result as ToolResult
 }
 
+function isTextPart(part: unknown): part is { type: "text"; text: string } {
+  return (
+    typeof part === "object" &&
+    part !== null &&
+    (part as { type?: unknown }).type === "text" &&
+    typeof (part as { text?: unknown }).text === "string"
+  )
+}
+
 function textOutput(result: ToolResult): string | undefined {
   if (typeof result.output === "string") return result.output
   if (typeof result.content === "string") return result.content
   if (!Array.isArray(result.content)) return undefined
-  return result.content
-    .filter((part): part is { type: "text"; text: string } => {
-      return (
-        typeof part === "object" &&
-        part !== null &&
-        (part as { type?: unknown }).type === "text" &&
-        typeof (part as { text?: unknown }).text === "string"
-      )
-    })
-    .map(part => part.text)
-    .join("")
+  return result.content.filter(isTextPart).map(part => part.text).join("")
+}
+
+// V2 hands edit results over as a content parts array, so both shapes must be replaceable.
+function replaceTextOutput(result: ToolResult, text: string): boolean {
+  if (typeof result.content === "string") {
+    result.content = text
+    return true
+  }
+  if (Array.isArray(result.content)) {
+    const part = result.content.find(isTextPart)
+    if (part) part.text = text
+    return part !== undefined
+  }
+  if (typeof result.output === "string") {
+    result.output = text
+    return true
+  }
+  return false
 }
 
 function compactReadOutput(output: string, directory: string): string {
@@ -139,10 +156,7 @@ export default Plugin.define({
 
       if (event.tool === "edit") {
         const output = textOutput(result)
-        if (output?.startsWith("Edited ")) {
-          if (typeof result.output === "string") result.output = "OK"
-          else if (typeof result.content === "string") result.content = "OK"
-        }
+        if (output?.startsWith("Edited ")) replaceTextOutput(result, "OK")
         return
       }
 
@@ -152,19 +166,7 @@ export default Plugin.define({
       const compacted = compactReadOutput(output, directory)
       if (compacted === output) return
 
-      if (typeof result.output === "string") result.output = compacted
-      else if (typeof result.content === "string") result.content = compacted
-      else if (Array.isArray(result.content)) {
-        const textParts = result.content.filter(part => {
-          return (
-            typeof part === "object" &&
-            part !== null &&
-            (part as { type?: unknown }).type === "text" &&
-            typeof (part as { text?: unknown }).text === "string"
-          )
-        }) as Array<{ type: "text"; text: string }>
-        if (textParts.length > 0) textParts[0].text = compacted
-      }
+      replaceTextOutput(result, compacted)
     })
   },
 })
