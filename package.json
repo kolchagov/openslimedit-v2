@@ -22,6 +22,7 @@
     "ai"
   ],
   "scripts": {
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "main": "./src/index.ts",
